@@ -1,0 +1,95 @@
+name: nest-saas-kit
+
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: info
+  SWAGGER_ENABLED: 'true'
+  PUBLIC_APP_URL: http://localhost:3000
+  DATABASE_URL: postgres://saas_app_user:${APP_DB_PASSWORD:-change-me-app-password}@postgres:5432/saas
+  DATABASE_MIGRATION_URL: postgres://saas:${POSTGRES_PASSWORD:-saas}@postgres:5432/saas
+  REDIS_URL: redis://redis:6379/0
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-only-jwt-secret-change-me-0000000000}
+  API_KEY_PEPPER: ${API_KEY_PEPPER:-dev-only-api-key-pepper-change-me-000000}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: saas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saas}
+      POSTGRES_DB: saas
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U saas -d saas']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ['node', 'dist/database/cli/migrate.js']
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+    profiles: ['app']
+
+  api:
+    build: .
+    command: ['node', 'dist/main.js']
+    environment: *app-env
+    ports:
+      - '${API_PORT:-3000}:3000'
+    # Readiness drain (5s) + in-flight requests + pool/Redis teardown.
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    profiles: ['app']
+
+  worker:
+    build: .
+    command: ['node', 'dist/worker.js']
+    environment: *app-env
+    # Lets in-flight BullMQ jobs finish before the worker exits.
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    profiles: ['app']
+
+volumes:
+  pgdata:
+  redisdata:
